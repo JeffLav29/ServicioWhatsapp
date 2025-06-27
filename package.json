@@ -2,10 +2,10 @@
   "name": "whatsapp-api-server",
   "version": "1.0.0",
   "description": "WhatsApp Web.js API Server",
-  "main": "index.js",
+  "main": "server.js",
   "scripts": {
-    "start": "node index.js",
-    "dev": "nodemon index.js"
+    "start": "node server.js",
+    "dev": "nodemon server.js"
   },
   "keywords": ["whatsapp", "api", "express", "whatsapp-web.js"],
   "author": "Tu Nombre",
