@@ -13,37 +13,38 @@ app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// MIDDLEWARE DE SEGURIDAD - API KEY
-const authenticateAPI = (req, res, next) => {
-    // Obtener API key del header, query param o body
-    const apiKey = req.headers['x-api-key'] || 
-                   req.headers['authorization']?.replace('Bearer ', '') ||
-                   req.query.api_key ||
-                   req.body.api_key;
-    
-    if (!apiKey) {
-        return res.status(401).json({ 
-            success: false,
-            error: 'API key requerida. Incluye x-api-key en headers o api_key como parámetro.' 
-        });
-    }
-    
-    if (apiKey !== process.env.API_KEY) {
-        console.log(`🚨 Intento de acceso no autorizado con key: ${apiKey.substring(0, 8)}...`);
-        return res.status(403).json({ 
-            success: false,
-            error: 'API key inválida' 
-        });
-    }
-    
-    console.log(`✅ Acceso autorizado desde IP: ${req.ip}`);
-    next();
-};
-
 // Variables globales
 let client;
 let isClientReady = false;
 let qrCodeData = '';
+
+// Middleware de autenticación API Key
+const authenticateApiKey = (req, res, next) => {
+    const apiKey = req.headers['x-api-key'] || req.headers['authorization']?.replace('Bearer ', '');
+    const validApiKey = process.env.API_KEY;
+
+    // Si no hay API_KEY configurada en el entorno, continúa sin validación
+    if (!validApiKey) {
+        console.log('⚠️ Advertencia: API_KEY no configurada en variables de entorno');
+        return next();
+    }
+
+    if (!apiKey) {
+        return res.status(401).json({
+            success: false,
+            error: 'API Key requerida. Incluye el header X-API-Key o Authorization'
+        });
+    }
+
+    if (apiKey !== validApiKey) {
+        return res.status(403).json({
+            success: false,
+            error: 'API Key inválida'
+        });
+    }
+
+    next();
+};
 
 // Configuración del cliente WhatsApp
 const initializeWhatsApp = () => {
@@ -153,27 +154,25 @@ const getMessageId = (response) => {
 
 // RUTAS DE LA API
 
-// Ruta pública: Información básica del servidor (sin autenticación)
+// Ruta raíz - NO requiere autenticación para mostrar info básica
 app.get('/', (req, res) => {
     res.json({
-        message: 'WhatsApp Web.js API - Servidor funcionando',
-        version: '1.0.0',
-        authentication: 'API Key requerida para endpoints protegidos',
-        docs: 'Contacta al administrador para obtener acceso'
+        message: 'Servidor WhatsApp Web.js está funcionando',
+        status: isClientReady ? 'Conectado' : 'Desconectado',
+        authentication: process.env.API_KEY ? 'Activada' : 'Desactivada',
+        endpoints: {
+            status: 'GET /api/whatsapp/status',
+            qr: 'GET /api/whatsapp/qr',
+            sendText: 'POST /api/whatsapp/send-text',
+            sendImage: 'POST /api/whatsapp/send-image',
+            restart: 'POST /api/whatsapp/restart'
+        },
+        authentication_note: process.env.API_KEY ? 'Endpoints protegidos requieren X-API-Key header' : 'Sin autenticación requerida'
     });
 });
 
-// Ruta pública: Health check (sin autenticación)
-app.get('/health', (req, res) => {
-    res.json({
-        status: 'OK',
-        timestamp: new Date().toISOString(),
-        uptime: process.uptime()
-    });
-});
-
-// APLICAR MIDDLEWARE DE AUTENTICACIÓN A TODAS LAS RUTAS PROTEGIDAS
-app.use('/api', authenticateAPI);
+// Aplicar middleware de autenticación a todas las rutas de la API
+app.use('/api', authenticateApiKey);
 
 // Ruta: Estado del servicio
 app.get('/api/whatsapp/status', (req, res) => {
@@ -358,7 +357,7 @@ app.get('/api/info', (req, res) => {
         version: '1.0.0',
         status: 'running',
         whatsapp_connected: isClientReady,
-        authenticated: true,
+        authentication: process.env.API_KEY ? 'enabled' : 'disabled',
         timestamp: new Date().toISOString()
     });
 });
@@ -383,7 +382,7 @@ app.use((error, req, res, next) => {
 // Iniciar servidor
 app.listen(PORT, () => {
     console.log(`🌐 Servidor iniciado en http://localhost:${PORT}`);
-    console.log(`🔐 API Key requerida: ${process.env.API_KEY ? 'Configurada ✅' : 'NO CONFIGURADA ❌'}`);
+    console.log(`🔐 Autenticación: ${process.env.API_KEY ? 'ACTIVADA' : 'DESACTIVADA'}`);
     console.log('📱 Inicializando cliente WhatsApp...');
     
     // Inicializar WhatsApp
