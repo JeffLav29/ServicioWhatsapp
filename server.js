@@ -21,6 +21,7 @@ let qrCodeData = '';
 // Middleware de autenticación API Key
 const authenticateApiKey = (req, res, next) => {
     const apiKey = req.headers['x-api-key'] || req.headers['authorization']?.replace('Bearer ', '');
+    console.log('🔐 Header recibido:', req.headers);
     const validApiKey = process.env.API_KEY;
 
     // Si no hay API_KEY configurada en el entorno, continúa sin validación
