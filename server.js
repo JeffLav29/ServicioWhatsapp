@@ -9,10 +9,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Middleware
-app.use(cors({
-    origin: '*', // En producción, especifica tu dominio
-    credentials: true
-}));
+app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
@@ -21,7 +18,7 @@ let client;
 let isClientReady = false;
 let qrCodeData = '';
 
-// Configuración del cliente WhatsApp optimizada para Railway
+// Configuración del cliente WhatsApp
 const initializeWhatsApp = () => {
     client = new Client({
         authStrategy: new LocalAuth({
@@ -30,7 +27,6 @@ const initializeWhatsApp = () => {
         }),
         puppeteer: {
             headless: true,
-            executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/google-chrome-stable',
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
@@ -39,16 +35,7 @@ const initializeWhatsApp = () => {
                 '--no-first-run',
                 '--no-zygote',
                 '--single-process',
-                '--disable-gpu',
-                '--disable-web-security',
-                '--disable-features=VizDisplayCompositor',
-                '--disable-background-timer-throttling',
-                '--disable-backgrounding-occluded-windows',
-                '--disable-renderer-backgrounding',
-                '--disable-extensions',
-                '--disable-plugins',
-                '--disable-ipc-flooding-protection',
-                '--memory-pressure-off'
+                '--disable-gpu'
             ]
         }
     });
@@ -56,9 +43,7 @@ const initializeWhatsApp = () => {
     // Evento: QR Code generado
     client.on('qr', (qr) => {
         console.log('\n🔗 QR Code generado. Escanea con tu WhatsApp:');
-        if (process.env.NODE_ENV === 'development') {
-            qrcode.generate(qr, { small: true });
-        }
+        qrcode.generate(qr, { small: true });
         qrCodeData = qr;
         isClientReady = false;
     });
@@ -86,19 +71,16 @@ const initializeWhatsApp = () => {
         console.log('🔌 Cliente desconectado:', reason);
         isClientReady = false;
         
-        // Reintentar conexión después de 10 segundos en producción
-        const retryDelay = process.env.NODE_ENV === 'production' ? 10000 : 5000;
+        // Reintentar conexión después de 5 segundos
         setTimeout(() => {
             console.log('🔄 Reintentando conexión...');
             initializeWhatsApp();
-        }, retryDelay);
+        }, 5000);
     });
 
     // Evento: Mensaje recibido (opcional - para logs)
     client.on('message', (message) => {
-        if (process.env.NODE_ENV === 'development') {
-            console.log(`📨 Mensaje recibido de ${message.from}: ${message.body}`);
-        }
+        console.log(`📨 Mensaje recibido de ${message.from}: ${message.body}`);
     });
 
     // Inicializar cliente
@@ -143,15 +125,6 @@ const getMessageId = (response) => {
 };
 
 // RUTAS DE LA API
-
-// Ruta: Health check (importante para servicios en la nube)
-app.get('/health', (req, res) => {
-    res.status(200).json({
-        status: 'OK',
-        timestamp: new Date().toISOString(),
-        uptime: process.uptime()
-    });
-});
 
 // Ruta: Estado del servicio
 app.get('/api/whatsapp/status', (req, res) => {
@@ -336,7 +309,6 @@ app.get('/api/info', (req, res) => {
         version: '1.0.0',
         status: 'running',
         whatsapp_connected: isClientReady,
-        environment: process.env.NODE_ENV || 'development',
         timestamp: new Date().toISOString()
     });
 });
@@ -347,7 +319,6 @@ app.get('/', (req, res) => {
         message: 'Servidor WhatsApp Web.js está funcionando',
         status: isClientReady ? 'Conectado' : 'Desconectado',
         endpoints: {
-            health: 'GET /health',
             status: 'GET /api/whatsapp/status',
             qr: 'GET /api/whatsapp/qr',
             sendText: 'POST /api/whatsapp/send-text',
@@ -375,43 +346,27 @@ app.use((error, req, res, next) => {
 });
 
 // Iniciar servidor
-const server = app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🌐 Servidor iniciado en puerto ${PORT}`);
-    console.log(`📱 Inicializando cliente WhatsApp...`);
+app.listen(PORT, () => {
+    console.log(`🌐 Servidor iniciado en http://localhost:${PORT}`);
+    console.log('📱 Inicializando cliente WhatsApp...');
     
     // Inicializar WhatsApp
     initializeWhatsApp();
 });
 
-// Configurar timeout del servidor
-server.timeout = 30000; // 30 segundos
-
 // Manejo de cierre graceful
-const gracefulShutdown = async (signal) => {
-    console.log(`\n🛑 Señal recibida: ${signal}`);
-    console.log('Cerrando servidor...');
-    
-    server.close(async () => {
-        console.log('Servidor HTTP cerrado');
-        
-        if (client) {
-            try {
-                await client.destroy();
-                console.log('Cliente WhatsApp cerrado correctamente');
-            } catch (error) {
-                console.error('Error al cerrar cliente WhatsApp:', error);
-            }
-        }
-        
-        process.exit(0);
-    });
-    
-    // Forzar cierre después de 10 segundos
-    setTimeout(() => {
-        console.error('Forzando cierre del proceso...');
-        process.exit(1);
-    }, 10000);
-};
+process.on('SIGINT', async () => {
+    console.log('\n🛑 Cerrando servidor...');
+    if (client) {
+        await client.destroy();
+    }
+    process.exit(0);
+});
 
-process.on('SIGINT', () => gracefulShutdown('SIGINT'));
-process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGTERM', async () => {
+    console.log('\n🛑 Terminando proceso...');
+    if (client) {
+        await client.destroy();
+    }
+    process.exit(0);
+});
