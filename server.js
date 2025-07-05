@@ -107,10 +107,6 @@ const initializeWhatsApp = () => {
         }, 5000);
     });
 
-    // Evento: Mensaje recibido (opcional - para logs)
-    client.on('message', (message) => {
-        console.log(`📨 Mensaje recibido de ${message.from}: ${message.body}`);
-    });
 
     // Inicializar cliente
     client.initialize();
