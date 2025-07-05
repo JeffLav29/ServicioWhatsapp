@@ -17,6 +17,9 @@ app.use(express.urlencoded({ extended: true }));
 let client;
 let isClientReady = false;
 let qrCodeData = '';
+let isInitializing = false;
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 5;
 
 // Middleware de autenticación API Key
 const authenticateApiKey = (req, res, next) => {
@@ -24,7 +27,6 @@ const authenticateApiKey = (req, res, next) => {
     console.log('🔐 Header recibido:', req.headers);
     const validApiKey = process.env.API_KEY;
 
-    // Si no hay API_KEY configurada en el entorno, continúa sin validación
     if (!validApiKey) {
         console.log('⚠️ Advertencia: API_KEY no configurada en variables de entorno');
         return next();
@@ -47,82 +49,181 @@ const authenticateApiKey = (req, res, next) => {
     next();
 };
 
-// Configuración del cliente WhatsApp
-const initializeWhatsApp = () => {
-    client = new Client({
-        authStrategy: new LocalAuth({
-            clientId: "ferre-app-client",
-            dataPath: './whatsapp-sessions'
-        }),
-        puppeteer: {
-            headless: true,
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-accelerated-2d-canvas',
-                '--no-first-run',
-                '--no-zygote',
-                '--single-process',
-                '--disable-gpu'
-            ]
+// Función para verificar si el cliente está realmente listo
+const isClientActuallyReady = async () => {
+    if (!client || !isClientReady) {
+        return false;
+    }
+    
+    try {
+        // Verificar que la página de Puppeteer esté activa
+        if (client.pupPage && client.pupPage.isClosed()) {
+            console.log('⚠️ Página de Puppeteer cerrada');
+            return false;
         }
-    });
+        
+        // Verificar estado del cliente
+        const state = await client.getState();
+        return state === 'CONNECTED';
+    } catch (error) {
+        console.log('⚠️ Error verificando estado del cliente:', error.message);
+        return false;
+    }
+};
 
-    // Evento: QR Code generado
-    client.on('qr', (qr) => {
-        console.log('\n🔗 QR Code generado. Escanea con tu WhatsApp:');
-        qrcode.generate(qr, { small: true });
-        qrCodeData = qr;
-        isClientReady = false;
-    });
+// Función para hacer operaciones de forma segura
+const safeClientOperation = async (operation, maxRetries = 3) => {
+    for (let i = 0; i < maxRetries; i++) {
+        try {
+            const ready = await isClientActuallyReady();
+            if (!ready) {
+                throw new Error('Cliente no está listo');
+            }
+            
+            return await operation();
+        } catch (error) {
+            console.log(`🔄 Intento ${i + 1} fallido:`, error.message);
+            
+            if (i === maxRetries - 1) {
+                throw error;
+            }
+            
+            // Esperar antes de reintentar
+            await new Promise(resolve => setTimeout(resolve, 2000 * (i + 1)));
+        }
+    }
+};
 
-    // Evento: Cliente autenticado
-    client.on('authenticated', () => {
-        console.log('✅ Cliente autenticado correctamente');
-    });
+// Configuración del cliente WhatsApp optimizada para Railway
+const initializeWhatsApp = async () => {
+    if (isInitializing) {
+        console.log('⏳ Ya se está inicializando el cliente...');
+        return;
+    }
+    
+    isInitializing = true;
+    
+    try {
+        // Destruir cliente existente si existe
+        if (client) {
+            try {
+                await client.destroy();
+            } catch (error) {
+                console.log('⚠️ Error al destruir cliente anterior:', error.message);
+            }
+        }
 
-    // Evento: Autenticación fallida
-    client.on('auth_failure', (msg) => {
-        console.error('❌ Error de autenticación:', msg);
-        isClientReady = false;
-    });
+        client = new Client({
+            authStrategy: new LocalAuth({
+                clientId: "ferre-app-client",
+                dataPath: './whatsapp-sessions'
+            }),
+            puppeteer: {
+                headless: true,
+                args: [
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-accelerated-2d-canvas',
+                    '--no-first-run',
+                    '--no-zygote',
+                    '--disable-gpu',
+                    '--memory-pressure-off',
+                    '--disable-background-timer-throttling',
+                    '--disable-backgrounding-occluded-windows',
+                    '--disable-renderer-backgrounding',
+                    '--disable-features=TranslateUI',
+                    '--disable-ipc-flooding-protection',
+                    '--disable-extensions',
+                    '--disable-default-apps',
+                    '--disable-component-extensions-with-background-pages'
+                ],
+                timeout: 60000
+            }
+        });
 
-    // Evento: Cliente listo
-    client.on('ready', () => {
-        console.log('🚀 Cliente WhatsApp listo!');
-        isClientReady = true;
-        qrCodeData = '';
-    });
+        // Evento: QR Code generado
+        client.on('qr', (qr) => {
+            console.log('\n🔗 QR Code generado. Escanea con tu WhatsApp:');
+            qrcode.generate(qr, { small: true });
+            qrCodeData = qr;
+            isClientReady = false;
+        });
 
-    // Evento: Cliente desconectado
-    client.on('disconnected', (reason) => {
-        console.log('🔌 Cliente desconectado:', reason);
+        // Evento: Cliente autenticado
+        client.on('authenticated', () => {
+            console.log('✅ Cliente autenticado correctamente');
+            reconnectAttempts = 0; // Resetear contador de intentos
+        });
+
+        // Evento: Autenticación fallida
+        client.on('auth_failure', (msg) => {
+            console.error('❌ Error de autenticación:', msg);
+            isClientReady = false;
+            isInitializing = false;
+        });
+
+        // Evento: Cliente listo
+        client.on('ready', () => {
+            console.log('🚀 Cliente WhatsApp listo!');
+            isClientReady = true;
+            qrCodeData = '';
+            isInitializing = false;
+            reconnectAttempts = 0;
+        });
+
+        // Evento: Cliente desconectado
+        client.on('disconnected', (reason) => {
+            console.log('🔌 Cliente desconectado:', reason);
+            isClientReady = false;
+            isInitializing = false;
+            
+            // Implementar backoff exponencial para reconexión
+            if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+                reconnectAttempts++;
+                const delay = Math.min(5000 * Math.pow(2, reconnectAttempts - 1), 30000);
+                
+                console.log(`🔄 Reintentando conexión (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS}) en ${delay/1000}s...`);
+                
+                setTimeout(() => {
+                    initializeWhatsApp();
+                }, delay);
+            } else {
+                console.error('❌ Máximo número de intentos de reconexión alcanzado');
+            }
+        });
+
+        // Manejar errores de Puppeteer
+        client.on('change_state', (state) => {
+            console.log('🔄 Estado cambiado:', state);
+        });
+
+        // Inicializar cliente
+        await client.initialize();
+        
+    } catch (error) {
+        console.error('❌ Error al inicializar cliente:', error);
+        isInitializing = false;
         isClientReady = false;
         
-        // Reintentar conexión después de 5 segundos
-        setTimeout(() => {
-            console.log('🔄 Reintentando conexión...');
-            initializeWhatsApp();
-        }, 5000);
-    });
-
-
-    // Inicializar cliente
-    client.initialize();
+        // Reintentar después de un delay
+        if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+            reconnectAttempts++;
+            setTimeout(() => {
+                initializeWhatsApp();
+            }, 10000);
+        }
+    }
 };
 
 // Función para validar número de teléfono
 const validatePhoneNumber = (phoneNumber) => {
-    // Remover caracteres no numéricos excepto el +
     const cleaned = phoneNumber.replace(/[^\d+]/g, '');
     
-    // Validar formato básico
     if (cleaned.length < 10 || cleaned.length > 15) {
         return null;
     }
     
-    // Si no tiene @c.us al final, agregarlo
     return cleaned.endsWith('@c.us') ? cleaned : `${cleaned}@c.us`;
 };
 
@@ -151,12 +252,13 @@ const getMessageId = (response) => {
 
 // RUTAS DE LA API
 
-// Ruta raíz - NO requiere autenticación para mostrar info básica
+// Ruta raíz
 app.get('/', (req, res) => {
     res.json({
         message: 'Servidor WhatsApp Web.js está funcionando',
         status: isClientReady ? 'Conectado' : 'Desconectado',
         authentication: process.env.API_KEY ? 'Activada' : 'Desactivada',
+        reconnectAttempts: reconnectAttempts,
         endpoints: {
             status: 'GET /api/whatsapp/status',
             qr: 'GET /api/whatsapp/qr',
@@ -168,14 +270,18 @@ app.get('/', (req, res) => {
     });
 });
 
-// Aplicar middleware de autenticación a todas las rutas de la API
+// Aplicar middleware de autenticación
 app.use('/api', authenticateApiKey);
 
 // Ruta: Estado del servicio
-app.get('/api/whatsapp/status', (req, res) => {
+app.get('/api/whatsapp/status', async (req, res) => {
+    const actuallyReady = await isClientActuallyReady();
     res.json({
-        connected: isClientReady,
+        connected: actuallyReady,
+        clientReady: isClientReady,
         qrCode: qrCodeData,
+        reconnectAttempts: reconnectAttempts,
+        isInitializing: isInitializing,
         timestamp: new Date().toISOString()
     });
 });
@@ -206,7 +312,6 @@ app.post('/api/whatsapp/send-text', async (req, res) => {
     try {
         const { phoneNumber, message } = req.body;
 
-        // Validaciones
         if (!phoneNumber || !message) {
             return res.status(400).json({
                 success: false,
@@ -214,14 +319,6 @@ app.post('/api/whatsapp/send-text', async (req, res) => {
             });
         }
 
-        if (!isClientReady) {
-            return res.status(503).json({
-                success: false,
-                error: 'Cliente WhatsApp no está listo. Verifica la conexión.'
-            });
-        }
-
-        // Validar y formatear número
         const validatedNumber = validatePhoneNumber(phoneNumber);
         if (!validatedNumber) {
             return res.status(400).json({
@@ -230,20 +327,20 @@ app.post('/api/whatsapp/send-text', async (req, res) => {
             });
         }
 
-        // Verificar si el número existe en WhatsApp
-        const numberId = await client.getNumberId(validatedNumber);
-        if (!numberId) {
-            return res.status(400).json({
-                success: false,
-                error: 'El número no está registrado en WhatsApp'
-            });
-        }
+        // Usar la función segura para operaciones
+        const result = await safeClientOperation(async () => {
+            // Verificar si el número existe en WhatsApp
+            const numberId = await client.getNumberId(validatedNumber);
+            if (!numberId) {
+                throw new Error('El número no está registrado en WhatsApp');
+            }
 
-        // Enviar mensaje
-        const response = await client.sendMessage(numberId._serialized, message);
-        
-        // Extraer ID del mensaje de forma segura
-        const messageId = getMessageId(response);
+            // Enviar mensaje
+            const response = await client.sendMessage(numberId._serialized, message);
+            return response;
+        });
+
+        const messageId = getMessageId(result);
         
         console.log(`✅ Mensaje enviado a ${phoneNumber}: ${message.substring(0, 50)}...`);
         
@@ -255,6 +352,20 @@ app.post('/api/whatsapp/send-text', async (req, res) => {
         });
 
     } catch (error) {
+        if (error.message.includes('El número no está registrado')) {
+            return res.status(400).json({
+                success: false,
+                error: error.message
+            });
+        }
+        
+        if (error.message.includes('Cliente no está listo') || error.message.includes('Session closed')) {
+            return res.status(503).json({
+                success: false,
+                error: 'Cliente WhatsApp no está listo. Intenta nuevamente en unos segundos.'
+            });
+        }
+        
         res.status(500).json(formatErrorResponse(error, 'Error al enviar mensaje'));
     }
 });
@@ -271,14 +382,6 @@ app.post('/api/whatsapp/send-image', async (req, res) => {
             });
         }
 
-        if (!isClientReady) {
-            return res.status(503).json({
-                success: false,
-                error: 'Cliente WhatsApp no está listo'
-            });
-        }
-
-        // Validar número
         const validatedNumber = validatePhoneNumber(phoneNumber);
         if (!validatedNumber) {
             return res.status(400).json({
@@ -287,7 +390,6 @@ app.post('/api/whatsapp/send-image', async (req, res) => {
             });
         }
 
-        // Verificar si el archivo existe
         if (!fs.existsSync(imagePath)) {
             return res.status(400).json({
                 success: false,
@@ -295,23 +397,20 @@ app.post('/api/whatsapp/send-image', async (req, res) => {
             });
         }
 
-        // Crear media
-        const media = MessageMedia.fromFilePath(imagePath);
-        
-        // Verificar número
-        const numberId = await client.getNumberId(validatedNumber);
-        if (!numberId) {
-            return res.status(400).json({
-                success: false,
-                error: 'El número no está registrado en WhatsApp'
-            });
-        }
+        // Usar la función segura para operaciones
+        const result = await safeClientOperation(async () => {
+            const media = MessageMedia.fromFilePath(imagePath);
+            
+            const numberId = await client.getNumberId(validatedNumber);
+            if (!numberId) {
+                throw new Error('El número no está registrado en WhatsApp');
+            }
 
-        // Enviar imagen
-        const response = await client.sendMessage(numberId._serialized, media, { caption });
-        
-        // Extraer ID del mensaje de forma segura
-        const messageId = getMessageId(response);
+            const response = await client.sendMessage(numberId._serialized, media, { caption });
+            return response;
+        });
+
+        const messageId = getMessageId(result);
         
         console.log(`🖼️ Imagen enviada a ${phoneNumber}`);
         
@@ -323,6 +422,20 @@ app.post('/api/whatsapp/send-image', async (req, res) => {
         });
 
     } catch (error) {
+        if (error.message.includes('El número no está registrado')) {
+            return res.status(400).json({
+                success: false,
+                error: error.message
+            });
+        }
+        
+        if (error.message.includes('Cliente no está listo') || error.message.includes('Session closed')) {
+            return res.status(503).json({
+                success: false,
+                error: 'Cliente WhatsApp no está listo. Intenta nuevamente en unos segundos.'
+            });
+        }
+        
         res.status(500).json(formatErrorResponse(error, 'Error al enviar imagen'));
     }
 });
@@ -330,10 +443,19 @@ app.post('/api/whatsapp/send-image', async (req, res) => {
 // Ruta: Reiniciar cliente
 app.post('/api/whatsapp/restart', async (req, res) => {
     try {
+        console.log('🔄 Reiniciando cliente...');
+        
         if (client) {
             await client.destroy();
         }
         
+        // Resetear variables
+        isClientReady = false;
+        isInitializing = false;
+        reconnectAttempts = 0;
+        qrCodeData = '';
+        
+        // Reinicializar después de un breve delay
         setTimeout(() => {
             initializeWhatsApp();
         }, 2000);
@@ -348,13 +470,17 @@ app.post('/api/whatsapp/restart', async (req, res) => {
 });
 
 // Ruta: Información del servidor
-app.get('/api/info', (req, res) => {
+app.get('/api/info', async (req, res) => {
+    const actuallyReady = await isClientActuallyReady();
     res.json({
         service: 'WhatsApp Web.js API',
         version: '1.0.0',
         status: 'running',
-        whatsapp_connected: isClientReady,
+        whatsapp_connected: actuallyReady,
+        whatsapp_ready: isClientReady,
         authentication: process.env.API_KEY ? 'enabled' : 'disabled',
+        reconnectAttempts: reconnectAttempts,
+        isInitializing: isInitializing,
         timestamp: new Date().toISOString()
     });
 });
@@ -401,4 +527,15 @@ process.on('SIGTERM', async () => {
         await client.destroy();
     }
     process.exit(0);
+});
+
+// Manejo de errores no capturados
+process.on('uncaughtException', (error) => {
+    console.error('❌ Error no capturado:', error);
+    // No terminar el proceso inmediatamente, intentar recuperarse
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('❌ Promise rechazada no manejada:', reason);
+    // No terminar el proceso inmediatamente, intentar recuperarse
 });
